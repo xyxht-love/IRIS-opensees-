@@ -1,0 +1,187 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+fetch.txt - 从 IRIS 获取地震波形，输出加速度时程文件
+用法: python fetch.txt --index <事件序号>
+"""
+
+import os
+import sys
+import argparse
+import numpy as np
+from obspy import UTCDateTime, read_inventory
+from obspy.clients.fdsn import Client
+import warnings
+warnings.filterwarnings("ignore")
+
+# ----------------- 配置 -----------------
+FDSN_CLIENT = "IRIS"
+XML_CACHE_DIR = "StationXML"
+PRE_FILTER = [0.001, 0.005, 20.0, 25.0]
+WATER_LEVEL = 60
+FILTER_FREQMIN = 0.1
+FILTER_FREQMAX = 20.0
+TAPER_PERCENT = 0.05
+
+os.makedirs(XML_CACHE_DIR, exist_ok=True)
+
+# ----------------- 事件列表（与后处理保持一致） -----------------
+EVENTS = [
+  {"network": "II", "station": "LVZ", "time": "1993-11-27T10:45:29", "magnitude": 4.2},
+  {"network": "II", "station": "LVZ", "time": "1995-08-31T13:03:27", "magnitude": 4.0},
+  {"network": "IU", "station": "KEV", "time": "1993-09-03T11:21:20", "magnitude": 4.8},
+  {"network": "II", "station": "LVZ", "time": "1995-06-16T07:40:35", "magnitude": 4.0},
+  {"network": "IU", "station": "KEV", "time": "1993-12-10T12:26:34", "magnitude": 4.6},
+  {"network": "S1", "station": "AUAPY", "time": "2026-04-04T23:35:55", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2026-05-05T22:14:53", "magnitude": 4.3},
+  {"network": "II", "station": "WRAB", "time": "2015-06-04T17:52:08", "magnitude": 4.3},
+  {"network": "II", "station": "WRAB", "time": "2026-06-30T14:00:41", "magnitude": 4.4},
+  {"network": "OK", "station": "U32A", "time": "2013-08-08T22:46:29", "magnitude": 4.2},
+  {"network": "II", "station": "WRAB", "time": "2019-08-18T12:49:44", "magnitude": 4.1},
+  {"network": "OK", "station": "U32A", "time": "2014-11-19T04:06:51", "magnitude": 4.0},
+  {"network": "II", "station": "WRAB", "time": "2017-05-28T16:50:23", "magnitude": 4.3},
+  {"network": "S1", "station": "AUAPY", "time": "2026-04-08T09:17:02", "magnitude": 4.3},
+  {"network": "OK", "station": "U32A", "time": "2013-11-12T04:00:57", "magnitude": 4.2},
+  {"network": "AU", "station": "NWAO", "time": "2022-01-24T21:50:14", "magnitude": 4.2},
+  {"network": "LD", "station": "PTN", "time": "2006-02-25T01:39:21", "magnitude": 4.1},
+  {"network": "N4", "station": "T35B", "time": "2014-11-09T20:10:18", "magnitude": 4.2},
+  {"network": "II", "station": "WRAB", "time": "2026-06-02T08:18:53", "magnitude": 4.5},
+  {"network": "II", "station": "WRAB", "time": "2016-04-28T16:52:44", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2017-05-28T16:50:23", "magnitude": 4.3},
+  {"network": "CN", "station": "GAC", "time": "2012-11-06T09:05:24", "magnitude": 4.5},
+  {"network": "NM", "station": "UALR", "time": "2010-10-11T13:33:39", "magnitude": 4.0},
+  {"network": "II", "station": "LVZ", "time": "2022-03-05T00:13:26", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2001-09-14T15:18:28", "magnitude": 5.0},
+  {"network": "AU", "station": "NWAO", "time": "2022-01-05T11:37:04", "magnitude": 4.2},
+  {"network": "TX", "station": "PB09", "time": "2021-12-16T12:25:25", "magnitude": 4.4},
+  {"network": "GT", "station": "BOSA", "time": "2002-01-08T05:32:12", "magnitude": 4.1},
+  {"network": "AU", "station": "WB2", "time": "2021-11-20T02:12:57", "magnitude": 4.3},
+  {"network": "AU", "station": "NWAO", "time": "2023-02-05T00:40:01", "magnitude": 4.5},
+  {"network": "US", "station": "SDCO", "time": "2007-01-03T14:34:40", "magnitude": 4.6},
+  {"network": "US", "station": "SDCO", "time": "2004-08-01T06:50:44", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2005-09-14T05:12:18", "magnitude": 4.9},
+  {"network": "GT", "station": "BOSA", "time": "2015-10-01T20:15:03", "magnitude": 4.4},
+  {"network": "AU", "station": "WB2", "time": "2024-02-23T04:53:10", "magnitude": 4.4},
+  {"network": "NM", "station": "UALR", "time": "2011-02-18T08:13:34", "magnitude": 4.1},
+  {"network": "AU", "station": "KLBR", "time": "2025-03-27T02:54:14", "magnitude": 4.2},
+  {"network": "AU", "station": "KLBR", "time": "2024-10-02T07:06:25", "magnitude": 4.1},
+  {"network": "AU", "station": "KLBR", "time": "2024-08-18T18:33:40", "magnitude": 4.4},
+  {"network": "CN", "station": "GAC", "time": "2013-05-17T13:43:22", "magnitude": 4.7}
+]
+
+# ----------------- 工具函数 -----------------
+CHANNEL_SCHEMES = [["BH1", "BH2", "BHZ"], ["BHN", "BHE", "BHZ"]]
+
+def check_components(st):
+    comp = {"H1": None, "H2": None, "V": None}
+    for tr in st:
+        cha = tr.stats.channel
+        last = cha[-1]
+        if last in ("1", "N"):
+            comp["H1"] = tr
+        elif last in ("2", "E"):
+            comp["H2"] = tr
+        elif last == "Z":
+            comp["V"] = tr
+        if cha.startswith("BH"):
+            if cha.endswith(("1", "N")):
+                comp["H1"] = tr
+            elif cha.endswith(("2", "E")):
+                comp["H2"] = tr
+            elif cha.endswith("Z"):
+                comp["V"] = tr
+    return comp
+
+def get_event_waveforms(event, before=60, after=3600):
+    client = Client(FDSN_CLIENT)
+    starttime = event.time - before
+    endtime = event.time + after
+    for loc in ["00", "10", ""]:
+        for scheme in CHANNEL_SCHEMES:
+            try:
+                st = client.get_waveforms(
+                    network=event.network,
+                    station=event.station,
+                    location=loc,
+                    channel=",".join(scheme),
+                    starttime=starttime,
+                    endtime=endtime,
+                    attach_response=False
+                )
+                if len(st) >= 3:
+                    comp = check_components(st)
+                    if all(v is not None for v in comp.values()):
+                        st.merge(fill_value="interpolate")
+                        return st
+            except:
+                continue
+    raise RuntimeError(f"无法获取 {event.network}.{event.station} 三分量波形")
+
+def get_inventory(network, station, starttime, endtime):
+    cache_file = os.path.join(XML_CACHE_DIR, f"{network}_{station}.xml")
+    if os.path.exists(cache_file):
+        try:
+            inv = read_inventory(cache_file)
+            return inv
+        except:
+            pass
+    client = Client(FDSN_CLIENT)
+    inv = client.get_stations(
+        network=network, station=station, channel="BH?",
+        location="*", starttime=starttime, endtime=endtime,
+        level="response"
+    )
+    inv.write(cache_file, format="STATIONXML")
+    return inv
+
+def preprocess_stream(st, inv):
+    st_acc = st.copy()
+    for tr in st_acc:
+        resp = inv.select(network=tr.stats.network, station=tr.stats.station,
+                          location=tr.stats.location, channel=tr.stats.channel)
+        tr.remove_response(inventory=resp, output="ACC",
+                           pre_filt=PRE_FILTER, water_level=WATER_LEVEL)
+        tr.detrend("demean")
+        tr.detrend("linear")
+        tr.taper(max_percentage=TAPER_PERCENT, type="cosine")
+        tr.filter("bandpass", freqmin=FILTER_FREQMIN, freqmax=FILTER_FREQMAX,
+                  corners=4, zerophase=True)
+        tr.data = tr.data.astype(np.float64)
+    return st_acc
+
+# ----------------- 主函数 -----------------
+def fetch_event(index):
+    if index < 1 or index > len(EVENTS):
+        raise ValueError(f"事件序号应在 1 ~ {len(EVENTS)} 之间")
+    info = EVENTS[index-1]
+    event = type('Event', (), {})()
+    event.network = info["network"]
+    event.station = info["station"]
+    event.time = UTCDateTime(info["time"])
+    event.magnitude = info.get("magnitude")
+
+    print(f"正在下载事件 {index}: {event.network}.{event.station} ({event.time})")
+    st = get_event_waveforms(event)
+    inv = get_inventory(event.network, event.station,
+                        event.time - 60, event.time + 3600)
+    st_acc = preprocess_stream(st, inv)
+    comp = check_components(st_acc)
+    if None in comp.values():
+        raise RuntimeError("预处理后缺少三分量")
+
+    # 输出文件
+    dt = comp["H1"].stats.delta
+    for key, fname in [("H1", "MH1.txt"), ("H2", "MH2.txt"), ("V", "combine.txt")]:
+        tr = comp[key]
+        data = tr.data
+        n = len(data)
+        times = np.arange(n) * dt
+        out = np.column_stack((times, data))
+        np.savetxt(fname, out, fmt="%.8e")
+        print(f"已输出 {fname} ({n} 点, dt={dt:.6f}s)")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="从 IRIS 获取地震动数据")
+    parser.add_argument("--index", type=int, required=True, help="事件序号 (1~40)")
+    args = parser.parse_args()
+    fetch_event(args.index)

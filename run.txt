@@ -1,0 +1,106 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+run.txt - 主控脚本
+用法示例:
+    python run.txt --network II --station LVZ --time "1993-11-27T10:45:29" --magnitude 4.2
+"""
+
+import os
+import sys
+import argparse
+import subprocess
+
+# ============================================================
+# 事件列表（必须与 fetch.txt 完全一致）
+# ============================================================
+EVENTS = [
+  {"network": "II", "station": "LVZ", "time": "1993-11-27T10:45:29", "magnitude": 4.2},
+  {"network": "II", "station": "LVZ", "time": "1995-08-31T13:03:27", "magnitude": 4.0},
+  {"network": "IU", "station": "KEV", "time": "1993-09-03T11:21:20", "magnitude": 4.8},
+  {"network": "II", "station": "LVZ", "time": "1995-06-16T07:40:35", "magnitude": 4.0},
+  {"network": "IU", "station": "KEV", "time": "1993-12-10T12:26:34", "magnitude": 4.6},
+  {"network": "S1", "station": "AUAPY", "time": "2026-04-04T23:35:55", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2026-05-05T22:14:53", "magnitude": 4.3},
+  {"network": "II", "station": "WRAB", "time": "2015-06-04T17:52:08", "magnitude": 4.3},
+  {"network": "II", "station": "WRAB", "time": "2026-06-30T14:00:41", "magnitude": 4.4},
+  {"network": "OK", "station": "U32A", "time": "2013-08-08T22:46:29", "magnitude": 4.2},
+  {"network": "II", "station": "WRAB", "time": "2019-08-18T12:49:44", "magnitude": 4.1},
+  {"network": "OK", "station": "U32A", "time": "2014-11-19T04:06:51", "magnitude": 4.0},
+  {"network": "II", "station": "WRAB", "time": "2017-05-28T16:50:23", "magnitude": 4.3},
+  {"network": "S1", "station": "AUAPY", "time": "2026-04-08T09:17:02", "magnitude": 4.3},
+  {"network": "OK", "station": "U32A", "time": "2013-11-12T04:00:57", "magnitude": 4.2},
+  {"network": "AU", "station": "NWAO", "time": "2022-01-24T21:50:14", "magnitude": 4.2},
+  {"network": "LD", "station": "PTN", "time": "2006-02-25T01:39:21", "magnitude": 4.1},
+  {"network": "N4", "station": "T35B", "time": "2014-11-09T20:10:18", "magnitude": 4.2},
+  {"network": "II", "station": "WRAB", "time": "2026-06-02T08:18:53", "magnitude": 4.5},
+  {"network": "II", "station": "WRAB", "time": "2016-04-28T16:52:44", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2017-05-28T16:50:23", "magnitude": 4.3},
+  {"network": "CN", "station": "GAC", "time": "2012-11-06T09:05:24", "magnitude": 4.5},
+  {"network": "NM", "station": "UALR", "time": "2010-10-11T13:33:39", "magnitude": 4.0},
+  {"network": "II", "station": "LVZ", "time": "2022-03-05T00:13:26", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2001-09-14T15:18:28", "magnitude": 5.0},
+  {"network": "AU", "station": "NWAO", "time": "2022-01-05T11:37:04", "magnitude": 4.2},
+  {"network": "TX", "station": "PB09", "time": "2021-12-16T12:25:25", "magnitude": 4.4},
+  {"network": "GT", "station": "BOSA", "time": "2002-01-08T05:32:12", "magnitude": 4.1},
+  {"network": "AU", "station": "WB2", "time": "2021-11-20T02:12:57", "magnitude": 4.3},
+  {"network": "AU", "station": "NWAO", "time": "2023-02-05T00:40:01", "magnitude": 4.5},
+  {"network": "US", "station": "SDCO", "time": "2007-01-03T14:34:40", "magnitude": 4.6},
+  {"network": "US", "station": "SDCO", "time": "2004-08-01T06:50:44", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2005-09-14T05:12:18", "magnitude": 4.9},
+  {"network": "GT", "station": "BOSA", "time": "2015-10-01T20:15:03", "magnitude": 4.4},
+  {"network": "AU", "station": "WB2", "time": "2024-02-23T04:53:10", "magnitude": 4.4},
+  {"network": "NM", "station": "UALR", "time": "2011-02-18T08:13:34", "magnitude": 4.1},
+  {"network": "AU", "station": "KLBR", "time": "2025-03-27T02:54:14", "magnitude": 4.2},
+  {"network": "AU", "station": "KLBR", "time": "2024-10-02T07:06:25", "magnitude": 4.1},
+  {"network": "AU", "station": "KLBR", "time": "2024-08-18T18:33:40", "magnitude": 4.4},
+  {"network": "CN", "station": "GAC", "time": "2013-05-17T13:43:22", "magnitude": 4.7}
+]
+
+def find_event_index(network, station, time_str):
+    for idx, ev in enumerate(EVENTS, start=1):
+        if ev["network"] == network and ev["station"] == station and ev["time"] == time_str:
+            return idx
+    raise ValueError(f"事件 {network}.{station} at {time_str} 未在列表中")
+
+def run_analysis(event_dict, opensees_path="OpenSees", tcl_script="模型.txt", post_script="后处理.txt"):
+    idx = find_event_index(event_dict["network"], event_dict["station"], event_dict["time"])
+    print(f"找到事件索引: {idx} ({event_dict['network']}.{event_dict['station']})")
+
+    os.environ["SEISMIC_EVENT_INDEX"] = str(idx)
+
+    print("\n--- 启动 OpenSees 分析 ---")
+    cmd = [opensees_path, tcl_script]
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print(f"OpenSees 运行失败，返回码 {result.returncode}")
+        return False
+
+    print("\n--- 启动后处理 ---")
+    cmd_post = [sys.executable, post_script]
+    result_post = subprocess.run(cmd_post)
+    if result_post.returncode != 0:
+        print(f"后处理运行失败，返回码 {result_post.returncode}")
+        return False
+
+    print("\n✅ 全部完成！")
+    return True
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="运行 OpenSees 分析并后处理")
+    parser.add_argument("--network", required=True, help="台网代码")
+    parser.add_argument("--station", required=True, help="台站代码")
+    parser.add_argument("--time", required=True, help="事件时间 (ISO格式)")
+    parser.add_argument("--magnitude", type=float, required=True, help="震级")
+    parser.add_argument("--opensees", default="OpenSees", help="OpenSees 可执行文件路径")
+    parser.add_argument("--tcl", default="模型.txt", help="Tcl 脚本文件名")
+    parser.add_argument("--post", default="后处理.txt", help="后处理脚本文件名")
+    args = parser.parse_args()
+
+    event_dict = {
+        "network": args.network,
+        "station": args.station,
+        "time": args.time,
+        "magnitude": args.magnitude
+    }
+    run_analysis(event_dict, args.opensees, args.tcl, args.post)
