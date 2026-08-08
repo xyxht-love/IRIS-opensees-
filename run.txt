@@ -1,0 +1,139 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+run_analysis.py
+Python 驱动脚本：根据指定事件运行完整的 OpenSees 分析 + EDP 后处理。
+用法：
+    from run_analysis import run_for_event
+    event = {"network": "II", "station": "LVZ", "time": "1993-11-27T10:45:29", "magnitude": 4.2}
+    run_for_event(event)
+或者命令行：
+    python run_analysis.py --network II --station LVZ --time "1993-11-27T10:45:29" --magnitude 4.2
+"""
+
+import os
+import sys
+import subprocess
+import argparse
+from datetime import datetime
+
+# ============================================================
+# 事件列表（与 fetch_seismic.py 保持一致）
+# ============================================================
+EVENTS = [
+    {"network": "II", "station": "LVZ", "time": "1993-11-27T10:45:29", "magnitude": 4.2},
+    {"network": "II", "station": "LVZ", "time": "1995-08-31T13:03:27", "magnitude": 4.0},
+    {"network": "IU", "station": "KEV", "time": "1993-09-03T11:21:20", "magnitude": 4.8},
+    {"network": "II", "station": "LVZ", "time": "1995-06-16T07:40:35", "magnitude": 4.0},
+    {"network": "IU", "station": "KEV", "time": "1993-12-10T12:26:34", "magnitude": 4.6},
+    {"network": "S1", "station": "AUAPY", "time": "2026-04-04T23:35:55", "magnitude": 4.4},
+    {"network": "II", "station": "WRAB", "time": "2026-05-05T22:14:53", "magnitude": 4.3},
+    {"network": "II", "station": "WRAB", "time": "2015-06-04T17:52:08", "magnitude": 4.3},
+    {"network": "II", "station": "WRAB", "time": "2026-06-30T14:00:41", "magnitude": 4.4},
+    {"network": "OK", "station": "U32A", "time": "2013-08-08T22:46:29", "magnitude": 4.2},
+    {"network": "II", "station": "WRAB", "time": "2019-08-18T12:49:44", "magnitude": 4.1},
+    {"network": "OK", "station": "U32A", "time": "2014-11-19T04:06:51", "magnitude": 4.0},
+    {"network": "II", "station": "WRAB", "time": "2017-05-28T16:50:23", "magnitude": 4.3},
+    {"network": "S1", "station": "AUAPY", "time": "2026-04-08T09:17:02", "magnitude": 4.3},
+    {"network": "OK", "station": "U32A", "time": "2013-11-12T04:00:57", "magnitude": 4.2},
+    {"network": "AU", "station": "NWAO", "time": "2022-01-24T21:50:14", "magnitude": 4.2},
+    {"network": "LD", "station": "PTN", "time": "2006-02-25T01:39:21", "magnitude": 4.1},
+    {"network": "N4", "station": "T35B", "time": "2014-11-09T20:10:18", "magnitude": 4.2},
+    {"network": "II", "station": "WRAB", "time": "2026-06-02T08:18:53", "magnitude": 4.5},
+    {"network": "II", "station": "WRAB", "time": "2016-04-28T16:52:44", "magnitude": 4.4},
+    {"network": "II", "station": "WRAB", "time": "2017-05-28T16:50:23", "magnitude": 4.3},
+    {"network": "CN", "station": "GAC", "time": "2012-11-06T09:05:24", "magnitude": 4.5},
+    {"network": "NM", "station": "UALR", "time": "2010-10-11T13:33:39", "magnitude": 4.0},
+    {"network": "II", "station": "LVZ", "time": "2022-03-05T00:13:26", "magnitude": 4.4},
+    {"network": "II", "station": "WRAB", "time": "2001-09-14T15:18:28", "magnitude": 5.0},
+    {"network": "AU", "station": "NWAO", "time": "2022-01-05T11:37:04", "magnitude": 4.2},
+    {"network": "TX", "station": "PB09", "time": "2021-12-16T12:25:25", "magnitude": 4.4},
+    {"network": "GT", "station": "BOSA", "time": "2002-01-08T05:32:12", "magnitude": 4.1},
+    {"network": "AU", "station": "WB2", "time": "2021-11-20T02:12:57", "magnitude": 4.3},
+    {"network": "AU", "station": "NWAO", "time": "2023-02-05T00:40:01", "magnitude": 4.5},
+    {"network": "US", "station": "SDCO", "time": "2007-01-03T14:34:40", "magnitude": 4.6},
+    {"network": "US", "station": "SDCO", "time": "2004-08-01T06:50:44", "magnitude": 4.4},
+    {"network": "II", "station": "WRAB", "time": "2005-09-14T05:12:18", "magnitude": 4.9},
+    {"network": "GT", "station": "BOSA", "time": "2015-10-01T20:15:03", "magnitude": 4.4},
+    {"network": "AU", "station": "WB2", "time": "2024-02-23T04:53:10", "magnitude": 4.4},
+    {"network": "NM", "station": "UALR", "time": "2011-02-18T08:13:34", "magnitude": 4.1},
+    {"network": "AU", "station": "KLBR", "time": "2025-03-27T02:54:14", "magnitude": 4.2},
+    {"network": "AU", "station": "KLBR", "time": "2024-10-02T07:06:25", "magnitude": 4.1},
+    {"network": "AU", "station": "KLBR", "time": "2024-08-18T18:33:40", "magnitude": 4.4},
+    {"network": "CN", "station": "GAC", "time": "2013-05-17T13:43:22", "magnitude": 4.7}
+]
+
+def find_event_index(event_dict):
+    """在 EVENTS 列表中查找匹配的事件索引（基于 network, station, time）"""
+    for i, ev in enumerate(EVENTS, start=1):
+        if (ev["network"] == event_dict["network"] and
+            ev["station"] == event_dict["station"] and
+            ev["time"] == event_dict["time"]):
+            return i
+    raise ValueError(f"未找到匹配的事件: {event_dict}")
+
+def run_for_event(event_dict, opensees_cmd="OpenSees", tcl_script="model_final_science.tcl",
+                  postprocess_script="openedp1.py"):
+    """
+    运行完整分析流程：
+    1. 根据 event_dict 查找事件索引。
+    2. 设置环境变量 SEISMIC_EVENT_INDEX。
+    3. 调用 OpenSees 执行 Tcl 脚本（自动下载波形并分析）。
+    4. 调用后处理脚本（自动使用同一事件索引并输出 EDP）。
+    """
+    # 查找索引
+    idx = find_event_index(event_dict)
+    print(f"使用事件索引: {idx} -> {event_dict['network']}.{event_dict['station']} ({event_dict['time']})")
+
+    # 设置环境变量（子进程继承）
+    env = os.environ.copy()
+    env["SEISMIC_EVENT_INDEX"] = str(idx)
+
+    # 步骤1：运行 OpenSees
+    print("\n" + "="*70)
+    print("步骤1：运行 OpenSees 动力分析")
+    print("="*70)
+    cmd1 = [opensees_cmd, tcl_script]
+    print(f"执行: {' '.join(cmd1)}")
+    result1 = subprocess.run(cmd1, env=env, capture_output=False)  # 让输出实时显示
+    if result1.returncode != 0:
+        raise RuntimeError(f"OpenSees 分析失败，返回码 {result1.returncode}")
+
+    # 步骤2：运行后处理
+    print("\n" + "="*70)
+    print("步骤2：运行 EDP 后处理")
+    print("="*70)
+    # 后处理脚本也通过环境变量传递事件索引，或者通过命令行参数
+    # 由于 openedp1.py 支持 --event-index，我们优先使用命令行参数，更明确
+    cmd2 = [sys.executable, postprocess_script, "--event-index", str(idx)]
+    print(f"执行: {' '.join(cmd2)}")
+    result2 = subprocess.run(cmd2, env=env, capture_output=False)
+    if result2.returncode != 0:
+        raise RuntimeError(f"后处理失败，返回码 {result2.returncode}")
+
+    print("\n" + "="*70)
+    print("✅ 全部完成！")
+    print("="*70)
+
+def main():
+    parser = argparse.ArgumentParser(description="根据指定事件运行 OpenSees 分析 + EDP 后处理")
+    parser.add_argument("--network", required=True, help="台网")
+    parser.add_argument("--station", required=True, help="台站")
+    parser.add_argument("--time", required=True, help="事件时间 (ISO 格式)")
+    parser.add_argument("--magnitude", type=float, required=True, help="震级")
+    parser.add_argument("--opensees", default="OpenSees", help="OpenSees 可执行文件路径")
+    parser.add_argument("--tcl", default="model_final_science.tcl", help="Tcl 脚本文件名")
+    parser.add_argument("--post", default="openedp1.py", help="后处理脚本文件名")
+    args = parser.parse_args()
+
+    event_dict = {
+        "network": args.network,
+        "station": args.station,
+        "time": args.time,
+        "magnitude": args.magnitude
+    }
+    run_for_event(event_dict, opensees_cmd=args.opensees, tcl_script=args.tcl,
+                  postprocess_script=args.post)
+
+if __name__ == "__main__":
+    main()
