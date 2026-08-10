@@ -1,0 +1,183 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+run.txt - 主控脚本（增强版：预检查波形、重试下载、超时控制、环境变量诊断）
+用法示例:
+    python run.txt --network II --station LVZ --time "1993-11-27T10:45:29" --magnitude 4.2
+"""
+
+import os
+import sys
+import argparse
+import subprocess
+import time
+
+# ============================================================
+# 事件列表（必须与 fetch.txt 完全一致，共 40 个）
+# ============================================================
+EVENTS = [
+  {"network": "II", "station": "LVZ", "time": "1993-11-27T10:45:29", "magnitude": 4.2},
+  {"network": "II", "station": "LVZ", "time": "1995-08-31T13:03:27", "magnitude": 4.0},
+  {"network": "IU", "station": "KEV", "time": "1993-09-03T11:21:20", "magnitude": 4.8},
+  {"network": "II", "station": "LVZ", "time": "1995-06-16T07:40:35", "magnitude": 4.0},
+  {"network": "IU", "station": "KEV", "time": "1993-12-10T12:26:34", "magnitude": 4.6},
+  {"network": "S1", "station": "AUAPY", "time": "2026-04-04T23:35:55", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2026-05-05T22:14:53", "magnitude": 4.3},
+  {"network": "II", "station": "WRAB", "time": "2015-06-04T17:52:08", "magnitude": 4.3},
+  {"network": "II", "station": "WRAB", "time": "2026-06-30T14:00:41", "magnitude": 4.4},
+  {"network": "OK", "station": "U32A", "time": "2013-08-08T22:46:29", "magnitude": 4.2},
+  {"network": "II", "station": "WRAB", "time": "2019-08-18T12:49:44", "magnitude": 4.1},
+  {"network": "OK", "station": "U32A", "time": "2014-11-19T04:06:51", "magnitude": 4.0},
+  {"network": "II", "station": "WRAB", "time": "2017-05-28T16:50:23", "magnitude": 4.3},
+  {"network": "S1", "station": "AUAPY", "time": "2026-04-08T09:17:02", "magnitude": 4.3},
+  {"network": "OK", "station": "U32A", "time": "2013-11-12T04:00:57", "magnitude": 4.2},
+  {"network": "AU", "station": "NWAO", "time": "2022-01-24T21:50:14", "magnitude": 4.2},
+  {"network": "LD", "station": "PTN", "time": "2006-02-25T01:39:21", "magnitude": 4.1},
+  {"network": "N4", "station": "T35B", "time": "2014-11-09T20:10:18", "magnitude": 4.2},
+  {"network": "II", "station": "WRAB", "time": "2026-06-02T08:18:53", "magnitude": 4.5},
+  {"network": "II", "station": "WRAB", "time": "2016-04-28T16:52:44", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2017-05-28T16:50:23", "magnitude": 4.3},
+  {"network": "CN", "station": "GAC", "time": "2012-11-06T09:05:24", "magnitude": 4.5},
+  {"network": "NM", "station": "UALR", "time": "2010-10-11T13:33:39", "magnitude": 4.0},
+  {"network": "II", "station": "LVZ", "time": "2022-03-05T00:13:26", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2001-09-14T15:18:28", "magnitude": 5.0},
+  {"network": "AU", "station": "NWAO", "time": "2022-01-05T11:37:04", "magnitude": 4.2},
+  {"network": "TX", "station": "PB09", "time": "2021-12-16T12:25:25", "magnitude": 4.4},
+  {"network": "GT", "station": "BOSA", "time": "2002-01-08T05:32:12", "magnitude": 4.1},
+  {"network": "AU", "station": "WB2", "time": "2021-11-20T02:12:57", "magnitude": 4.3},
+  {"network": "AU", "station": "NWAO", "time": "2023-02-05T00:40:01", "magnitude": 4.5},
+  {"network": "US", "station": "SDCO", "time": "2007-01-03T14:34:40", "magnitude": 4.6},
+  {"network": "US", "station": "SDCO", "time": "2004-08-01T06:50:44", "magnitude": 4.4},
+  {"network": "II", "station": "WRAB", "time": "2005-09-14T05:12:18", "magnitude": 4.9},
+  {"network": "GT", "station": "BOSA", "time": "2015-10-01T20:15:03", "magnitude": 4.4},
+  {"network": "AU", "station": "WB2", "time": "2024-02-23T04:53:10", "magnitude": 4.4},
+  {"network": "NM", "station": "UALR", "time": "2011-02-18T08:13:34", "magnitude": 4.1},
+  {"network": "AU", "station": "KLBR", "time": "2025-03-27T02:54:14", "magnitude": 4.2},
+  {"network": "AU", "station": "KLBR", "time": "2024-10-02T07:06:25", "magnitude": 4.1},
+  {"network": "AU", "station": "KLBR", "time": "2024-08-18T18:33:40", "magnitude": 4.4},
+  {"network": "CN", "station": "GAC", "time": "2013-05-17T13:43:22", "magnitude": 4.7}
+]
+
+def find_event_index(network, station, time_str):
+    for idx, ev in enumerate(EVENTS, start=1):
+        if ev["network"] == network and ev["station"] == station and ev["time"] == time_str:
+            return idx
+    raise ValueError(f"事件 {network}.{station} at {time_str} 未在列表中")
+
+def ensure_waveforms(event_index, max_retries=3, delay=5):
+    """检查波形文件是否存在，若不存在则调用 fetch.txt 下载，最多重试 max_retries 次"""
+    base_dir = f"events/event_{event_index}"
+    required_files = ["MH1.txt", "MH2.txt", "combine.txt"]
+    for attempt in range(1, max_retries + 1):
+        missing = []
+        for fname in required_files:
+            if not os.path.exists(os.path.join(base_dir, fname)):
+                missing.append(fname)
+        if not missing:
+            print(f"所有波形文件已存在: {base_dir}")
+            return True
+        print(f"波形文件缺失: {missing}，正在尝试下载 (尝试 {attempt}/{max_retries})...")
+        try:
+            # 调用 fetch.txt 下载，设置超时 120 秒
+            subprocess.run(
+                [sys.executable, "fetch.txt", "--index", str(event_index)],
+                check=True,
+                timeout=120
+            )
+            print("下载完成。")
+            # 下载后立即检查文件是否存在
+            all_exist = True
+            for fname in required_files:
+                if not os.path.exists(os.path.join(base_dir, fname)):
+                    all_exist = False
+                    break
+            if all_exist:
+                return True
+            else:
+                print(f"下载后仍有文件缺失，尝试重试...")
+        except subprocess.TimeoutExpired:
+            print(f"下载超时（120秒），尝试重试...")
+        except subprocess.CalledProcessError as e:
+            print(f"下载失败 (返回码 {e.returncode})，尝试重试...")
+        except FileNotFoundError:
+            print("错误：未找到 fetch.txt，请确保该脚本位于当前目录。")
+            return False
+        if attempt < max_retries:
+            print(f"等待 {delay} 秒后重试...")
+            time.sleep(delay)
+    print(f"在 {max_retries} 次尝试后仍无法获取波形文件。")
+    return False
+
+def run_analysis(event_dict, opensees_path="OpenSees", tcl_script="模型.txt", post_script="后处理.txt"):
+    try:
+        idx = find_event_index(event_dict["network"], event_dict["station"], event_dict["time"])
+    except ValueError as e:
+        print(f"错误: {e}")
+        return False
+    print(f"找到事件索引: {idx} ({event_dict['network']}.{event_dict['station']})")
+
+    # 确保波形文件存在
+    if not ensure_waveforms(idx):
+        print("无法获取波形文件，终止分析。")
+        return False
+
+    # 设置环境变量（并打印确认）
+    os.environ["SEISMIC_EVENT_INDEX"] = str(idx)
+    print(f"环境变量 SEISMIC_EVENT_INDEX = {os.environ['SEISMIC_EVENT_INDEX']}")
+
+    # 运行 OpenSees
+    print("\n--- 启动 OpenSees 分析 ---")
+    cmd = [opensees_path, tcl_script]
+    try:
+        # 显式传递当前环境
+        result = subprocess.run(cmd, env=os.environ, timeout=3600)  # 1小时超时
+    except subprocess.TimeoutExpired:
+        print("OpenSees 运行超时（1小时），终止。")
+        return False
+    except FileNotFoundError:
+        print(f"错误：未找到 OpenSees 可执行文件 '{opensees_path}'，请检查路径。")
+        return False
+
+    if result.returncode != 0:
+        print(f"OpenSees 运行失败，返回码 {result.returncode}")
+        return False
+
+    print("OpenSees 分析成功完成。")
+
+    # 运行后处理
+    print("\n--- 启动后处理 ---")
+    try:
+        result_post = subprocess.run([sys.executable, post_script], timeout=300)
+    except subprocess.TimeoutExpired:
+        print("后处理超时（5分钟），终止。")
+        return False
+    except FileNotFoundError:
+        print(f"错误：未找到后处理脚本 '{post_script}'。")
+        return False
+
+    if result_post.returncode != 0:
+        print(f"后处理运行失败，返回码 {result_post.returncode}")
+        return False
+
+    print("\n✅ 全部完成！")
+    return True
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="运行 OpenSees 分析并后处理")
+    parser.add_argument("--network", required=True, help="台网代码")
+    parser.add_argument("--station", required=True, help="台站代码")
+    parser.add_argument("--time", required=True, help="事件时间 (ISO格式)")
+    parser.add_argument("--magnitude", type=float, required=True, help="震级")
+    parser.add_argument("--opensees", default="OpenSees", help="OpenSees 可执行文件路径（默认 'OpenSees'）")
+    parser.add_argument("--tcl", default="模型.txt", help="Tcl 脚本文件名")
+    parser.add_argument("--post", default="后处理.txt", help="后处理脚本文件名")
+    args = parser.parse_args()
+
+    event_dict = {
+        "network": args.network,
+        "station": args.station,
+        "time": args.time,
+        "magnitude": args.magnitude
+    }
+    success = run_analysis(event_dict, args.opensees, args.tcl, args.post)
+    sys.exit(0 if success else 1)
